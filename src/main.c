@@ -2,98 +2,254 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
-#include <time.h>     // For seeding rand()
-#include <unistd.h>   // For getopt() - POSIX standard for option parsing
-#include <errno.h>    // For perror()
-#include <getopt.h>   // For getopt_long, if preferred, but getopt is used here
+#include <time.h>
+#include <unistd.h>
+#include <errno.h>
+#include <getopt.h>
 
-#include "rsa.h"      // For RSA functionalities
+#include "rsa.h"
 #include "blowfish.h"
 #include "tea.h"
-#include "utils.h"    // Assumed to contain symmetric cipher helpers
+#include "utils.h"
 
-// Define modes
 typedef enum { MODE_ENCRYPT, MODE_DECRYPT, MODE_KEYGEN, MODE_NONE } op_mode;
 typedef enum { ALGO_BLOWFISH, ALGO_TEA, ALGO_RSA, ALGO_NONE } algorithm_type;
 
-// Function pointer types for symmetric cipher operations (unchanged)
 typedef void (*init_func_t)(void*, const uint8_t*, size_t);
 typedef void (*crypt_func_t)(const void*, uint*, uint*);
 
+#define RSA_KEY_FILE_LINE_MAX_LEN 4096 
 
-// --- RSA Key I/O Stubs (These need to be implemented in rsa.c or similar) ---
+static int write_mp_int_to_file_hex(FILE *f, const char *label, mp_int *val) {
+    int err;
+    int size; 
+    char *buffer;
 
-/**
- * @brief Loads an RSA public key from a file into the rsa_ctx.
- * @param ctx Pointer to the rsa_ctx structure.
- * @param pubkey_file Path to the public key file.
- * @return MP_OKAY on success, an error code otherwise.
- * @note The file format needs to be defined and implemented.
- * Typically stores modulus (n) and public exponent (e).
- */
+    if (!f || !label || !val) {
+        return MP_VAL;
+    }
+
+    if ((err = mp_radix_size(val, 16, &size)) != MP_OKAY) {
+        fprintf(stderr, "Error: mp_radix_size failed for %s: %s\n", label, mp_error_to_string(err));
+        return err;
+    }
+
+    buffer = malloc(size);
+    if (!buffer) {
+        fprintf(stderr, "Error: Memory allocation failed for %s hex string.\n", label);
+        return MP_MEM;
+    }
+
+    if ((err = mp_toradix(val, buffer, 16)) != MP_OKAY) {
+        fprintf(stderr, "Error: mp_toradix failed for %s: %s\n", label, mp_error_to_string(err));
+        free(buffer);
+        return err;
+    }
+
+    if (fprintf(f, "%s: %s\n", label, buffer) < 0) {
+        perror("Error writing mp_int to file");
+        free(buffer);
+        return MP_ERR; 
+    }
+
+    free(buffer);
+    return MP_OKAY;
+}
+
+static int read_mp_int_from_file_hex(FILE *f, const char *expected_label, mp_int *val) {
+    char line_buf[RSA_KEY_FILE_LINE_MAX_LEN];
+    char *hex_str_start;
+    size_t expected_label_len;
+    int err;
+
+    if (!f || !expected_label || !val) {
+        return MP_VAL;
+    }
+
+    expected_label_len = strlen(expected_label);
+
+    if (fgets(line_buf, sizeof(line_buf), f) == NULL) {
+        if (feof(f)) {
+            fprintf(stderr, "Error: Unexpected end of file while looking for label '%s'.\n", expected_label);
+        } else {
+            perror("Error reading line from key file");
+        }
+        return MP_ERR; 
+    }
+
+    line_buf[strcspn(line_buf, "\r\n")] = 0;
+
+    if (strncmp(line_buf, expected_label, expected_label_len) != 0 ||
+        (line_buf[expected_label_len] != ':' || line_buf[expected_label_len + 1] != ' ')) {
+        fprintf(stderr, "Error: Malformed line or missing label. Expected '%s: <hex_value>', got '%s'.\n", expected_label, line_buf);
+        return MP_VAL; 
+    }
+
+    hex_str_start = line_buf + expected_label_len + 2; 
+
+    if ((err = mp_read_radix(val, hex_str_start, 16)) != MP_OKAY) {
+        fprintf(stderr, "Error: mp_read_radix failed for label '%s', value '%s': %s\n", expected_label, hex_str_start, mp_error_to_string(err));
+        return err;
+    }
+
+    return MP_OKAY;
+}
+
 static int rsa_load_public_key_from_file(rsa_ctx *ctx, const char *pubkey_file) {
-    // STUB: Implementation needed.
-    // Example: Open pubkey_file, read n and e, and load them into ctx->n and ctx->e.
-    // Ensure mp_int variables are initialized if not already.
-    fprintf(stdout, "INFO: Stub rsa_load_public_key_from_file called for %s. Needs implementation.\n", pubkey_file);
-    // For testing, you might hardcode or set minimal values if ctx is already init'd
-    // mp_set_ul(&ctx->e, 65537UL); // Example, n would also be needed
-    if (!pubkey_file) return MP_ERR; // Basic check
-    return MP_OKAY; // Placeholder success
+    FILE *f;
+    char line_buf[RSA_KEY_FILE_LINE_MAX_LEN];
+    int err = MP_OKAY;
+    const char *expected_type = "type: RSA_PUBLIC_KEY";
+
+    if (!ctx || !pubkey_file) {
+        fprintf(stderr, "Error: Null context or public key file path provided to rsa_load_public_key_from_file.\n");
+        return MP_VAL;
+    }
+
+    f = fopen(pubkey_file, "r");
+    if (!f) {
+        perror("Error opening public key file for reading");
+        return MP_ERR; 
+    }
+
+    if (fgets(line_buf, sizeof(line_buf), f) == NULL) {
+        err = MP_ERR;
+        fprintf(stderr, "Error: Public key file is empty or could not be read.\n");
+        goto cleanup;
+    }
+    line_buf[strcspn(line_buf, "\r\n")] = 0;
+    if (strcmp(line_buf, expected_type) != 0) {
+        err = MP_VAL;
+        fprintf(stderr, "Error: Invalid public key file type. Expected '%s', got '%s'.\n", expected_type, line_buf);
+        goto cleanup;
+    }
+
+    if ((err = read_mp_int_from_file_hex(f, "n", &ctx->n)) != MP_OKAY) goto cleanup;
+
+    if ((err = read_mp_int_from_file_hex(f, "e", &ctx->e)) != MP_OKAY) goto cleanup;
+
+    printf("INFO: RSA public key loaded successfully from %s.\n", pubkey_file);
+
+cleanup:
+    if (f) fclose(f);
+    return err;
 }
 
-/**
- * @brief Loads an RSA private key from a file into the rsa_ctx.
- * @param ctx Pointer to the rsa_ctx structure.
- * @param privkey_file Path to the private key file.
- * @return MP_OKAY on success, an error code otherwise.
- * @note The file format needs to be defined and implemented.
- * Typically stores modulus (n), private exponent (d), and optionally CRT params.
- */
 static int rsa_load_private_key_from_file(rsa_ctx *ctx, const char *privkey_file) {
-    // STUB: Implementation needed.
-    // Example: Open privkey_file, read necessary components (n, d, p, q, dp, dq, qinv)
-    // and load them into the rsa_ctx.
-    fprintf(stdout, "INFO: Stub rsa_load_private_key_from_file called for %s. Needs implementation.\n", privkey_file);
-    if (!privkey_file) return MP_ERR; // Basic check
-    return MP_OKAY; // Placeholder success
+    FILE *f;
+    char line_buf[RSA_KEY_FILE_LINE_MAX_LEN];
+    int err = MP_OKAY;
+    const char *expected_type = "type: RSA_PRIVATE_KEY";
+
+    if (!ctx || !privkey_file) {
+        fprintf(stderr, "Error: Null context or private key file path provided to rsa_load_private_key_from_file.\n");
+        return MP_VAL;
+    }
+
+    f = fopen(privkey_file, "r");
+    if (!f) {
+        perror("Error opening private key file for reading");
+        return MP_ERR;
+    }
+
+    if (fgets(line_buf, sizeof(line_buf), f) == NULL) {
+        err = MP_ERR;
+        fprintf(stderr, "Error: Private key file is empty or could not be read.\n");
+        goto cleanup;
+    }
+    line_buf[strcspn(line_buf, "\r\n")] = 0; 
+    if (strcmp(line_buf, expected_type) != 0) {
+        err = MP_VAL;
+        fprintf(stderr, "Error: Invalid private key file type. Expected '%s', got '%s'.\n", expected_type, line_buf);
+        goto cleanup;
+    }
+
+    if ((err = read_mp_int_from_file_hex(f, "n", &ctx->n)) != MP_OKAY) goto cleanup;
+    if ((err = read_mp_int_from_file_hex(f, "e", &ctx->e)) != MP_OKAY) goto cleanup;
+    if ((err = read_mp_int_from_file_hex(f, "d", &ctx->d)) != MP_OKAY) goto cleanup;
+    if ((err = read_mp_int_from_file_hex(f, "p", &ctx->p)) != MP_OKAY) goto cleanup;
+    if ((err = read_mp_int_from_file_hex(f, "q", &ctx->q)) != MP_OKAY) goto cleanup;
+    if ((err = read_mp_int_from_file_hex(f, "dp", &ctx->dp)) != MP_OKAY) goto cleanup;
+    if ((err = read_mp_int_from_file_hex(f, "dq", &ctx->dq)) != MP_OKAY) goto cleanup;
+    if ((err = read_mp_int_from_file_hex(f, "qinv", &ctx->qinv)) != MP_OKAY) goto cleanup;
+
+    printf("INFO: RSA private key loaded successfully from %s.\n", privkey_file);
+
+cleanup:
+    if (f) fclose(f);
+    return err;
 }
 
-/**
- * @brief Saves an RSA public key from rsa_ctx to a file.
- * @param ctx Pointer to the rsa_ctx structure containing the key.
- * @param pubkey_file Path to save the public key file.
- * @return MP_OKAY on success, an error code otherwise.
- * @note The file format needs to be defined and implemented. Saves n and e.
- */
 static int rsa_save_public_key_to_file(rsa_ctx *ctx, const char *pubkey_file) {
-    // STUB: Implementation needed.
-    // Example: Open pubkey_file, get n and e from ctx, convert to a storable format, and write.
-    fprintf(stdout, "INFO: Stub rsa_save_public_key_to_file called for %s. Needs implementation.\n", pubkey_file);
-    // FILE* f = fopen(pubkey_file, "wb"); if (!f) return MP_ERR;
-    // ... logic to write mp_int n, e ...
-    // fclose(f);
-    if (!ctx || !pubkey_file) return MP_ERR;
-    return MP_OKAY; // Placeholder success
+    FILE *f;
+    int err = MP_OKAY;
+
+    if (!ctx || !pubkey_file) {
+        fprintf(stderr, "Error: Null context or public key file path provided to rsa_save_public_key_to_file.\n");
+        return MP_VAL;
+    }
+
+    f = fopen(pubkey_file, "w");
+    if (!f) {
+        perror("Error opening public key file for writing");
+        return MP_ERR;
+    }
+
+    fprintf(f, "type: RSA_PUBLIC_KEY\n");
+
+    if ((err = write_mp_int_to_file_hex(f, "n", &ctx->n)) != MP_OKAY) goto cleanup;
+    if ((err = write_mp_int_to_file_hex(f, "e", &ctx->e)) != MP_OKAY) goto cleanup;
+
+    printf("INFO: RSA public key saved successfully to %s.\n", pubkey_file);
+
+cleanup:
+    if (f) {
+        if (fclose(f) == EOF && err == MP_OKAY) { 
+            perror("Error closing public key file");
+            err = MP_ERR;
+        }
+    }
+    return err;
 }
 
-/**
- * @brief Saves an RSA private key from rsa_ctx to a file.
- * @param ctx Pointer to the rsa_ctx structure containing the key.
- * @param privkey_file Path to save the private key file.
- * @return MP_OKAY on success, an error code otherwise.
- * @note The file format needs to be defined and implemented. Saves n, d, p, q, dp, dq, qinv.
- */
 static int rsa_save_private_key_to_file(rsa_ctx *ctx, const char *privkey_file) {
-    // STUB: Implementation needed.
-    // Example: Open privkey_file, get components from ctx, convert and write.
-    fprintf(stdout, "INFO: Stub rsa_save_private_key_to_file called for %s. Needs implementation.\n", privkey_file);
-    if (!ctx || !privkey_file) return MP_ERR;
-    return MP_OKAY; // Placeholder success
+    FILE *f;
+    int err = MP_OKAY;
+
+    if (!ctx || !privkey_file) {
+        fprintf(stderr, "Error: Null context or private key file path provided to rsa_save_private_key_to_file.\n");
+        return MP_VAL;
+    }
+
+    f = fopen(privkey_file, "w");
+    if (!f) {
+        perror("Error opening private key file for writing");
+        return MP_ERR;
+    }
+
+    fprintf(f, "type: RSA_PRIVATE_KEY\n");
+
+    if ((err = write_mp_int_to_file_hex(f, "n", &ctx->n)) != MP_OKAY) goto cleanup;
+    if ((err = write_mp_int_to_file_hex(f, "e", &ctx->e)) != MP_OKAY) goto cleanup;
+    if ((err = write_mp_int_to_file_hex(f, "d", &ctx->d)) != MP_OKAY) goto cleanup;
+    if ((err = write_mp_int_to_file_hex(f, "p", &ctx->p)) != MP_OKAY) goto cleanup; 
+    if ((err = write_mp_int_to_file_hex(f, "q", &ctx->q)) != MP_OKAY) goto cleanup;
+    if ((err = write_mp_int_to_file_hex(f, "dp", &ctx->dp)) != MP_OKAY) goto cleanup;
+    if ((err = write_mp_int_to_file_hex(f, "dq", &ctx->dq)) != MP_OKAY) goto cleanup;
+    if ((err = write_mp_int_to_file_hex(f, "qinv", &ctx->qinv)) != MP_OKAY) goto cleanup;
+
+
+    printf("INFO: RSA private key saved successfully to %s.\n", privkey_file);
+
+cleanup:
+    if (f) {
+        if (fclose(f) == EOF && err == MP_OKAY) {
+            perror("Error closing private key file");
+            err = MP_ERR;
+        }
+    }
+    return err;
 }
-
-
-// --- Helper Functions ---
 
 void print_usage(const char *prog_name) {
     fprintf(stderr, "Usage: %s <-e|-d|-g <keysize>> -a <algorithm> [options]\n\n", prog_name);
@@ -115,7 +271,6 @@ void print_usage(const char *prog_name) {
     fprintf(stderr, "  For -g (keygen):  -N <key_name_base> (e.g., 'mykey' -> 'mykey.pub', 'mykey.priv')\n");
 }
 
-// --- RSA Key Generation ---
 int handle_rsa_key_generation(const char *key_name_base, int keysize) {
     rsa_ctx ctx;
     int err;
@@ -142,7 +297,6 @@ int handle_rsa_key_generation(const char *key_name_base, int keysize) {
     printf("Saving public key to %s...\n", pub_file_name);
     if ((err = rsa_save_public_key_to_file(&ctx, pub_file_name)) != MP_OKAY) {
         fprintf(stderr, "Error: Failed to save RSA public key: %s\n", mp_error_to_string(err));
-        // Continue to save private key if public key saving failed, but report error.
     }
 
     printf("Saving private key to %s...\n", priv_file_name);
@@ -152,32 +306,29 @@ int handle_rsa_key_generation(const char *key_name_base, int keysize) {
 
     rsa_clear_ctx(&ctx);
     printf("RSA key generation process finished.\n");
-    return (err == MP_OKAY) ? 0 : -1; // Return success if last operation was okay, otherwise error
+    return (err == MP_OKAY) ? 0 : -1; 
 }
 
-
-// --- File Processing ---
 int process_file(op_mode mode, algorithm_type algo, 
-                 const char *key_str,      // For symmetric algos
-                 const char *pubkey_file,  // For RSA encryption
-                 const char *privkey_file, // For RSA decryption
+                 const char *key_str,     
+                 const char *pubkey_file,  
+                 const char *privkey_file, 
                  const char *infile, const char *outfile) {
     FILE *fin = NULL;
     FILE *fout = NULL;
-    uint8_t *buffer = NULL; // For symmetric ciphers
+    uint8_t *buffer = NULL; 
     long file_size = 0;
     size_t data_len = 0; 
     size_t buffer_len = 0;
     int result = -1; 
 
-    // --- Algorithm Specific Setup ---
-    blowfish_ctx bf_ctx_sym; // Renamed to avoid conflict if rsa_ctx is named ctx
+    blowfish_ctx bf_ctx_sym; 
     uint tea_key[4]; 
     void *cipher_context_sym = NULL; 
     crypt_func_t encrypt_block_sym = NULL;
     crypt_func_t decrypt_block_sym = NULL;
 
-    rsa_ctx rsa_ctx_obj; // RSA context
+    rsa_ctx rsa_ctx_obj; 
     int rsa_err;
 
     switch (algo) {
@@ -218,7 +369,6 @@ int process_file(op_mode mode, algorithm_type algo,
                     goto cleanup;
                 }
             }
-            // RSA processing happens below, not using the symmetric cipher file reading loop
             break;
         default:
             fprintf(stderr, "Error: Invalid algorithm selected for processing.\n");
@@ -226,7 +376,6 @@ int process_file(op_mode mode, algorithm_type algo,
     }
 
     if (algo == ALGO_RSA) {
-        // RSA file processing is handled by rsa_encrypt_file / rsa_decrypt_file directly
         if (mode == MODE_ENCRYPT) {
             printf("Encrypting %s to %s using RSA...\n", infile, outfile);
             rsa_err = rsa_encrypt_file(&rsa_ctx_obj, infile, outfile);
@@ -246,12 +395,10 @@ int process_file(op_mode mode, algorithm_type algo,
                 result = 0;
             }
         }
-        rsa_clear_ctx(&rsa_ctx_obj); // Clear RSA context after use
-        goto cleanup_no_files; // Skip symmetric file I/O and buffer free
+        rsa_clear_ctx(&rsa_ctx_obj); 
+        goto cleanup_no_files; 
     }
 
-
-    // --- Open Files (for symmetric ciphers) ---
     fin = fopen(infile, "rb");
     if (!fin) {
         perror("Error opening input file");
@@ -264,7 +411,6 @@ int process_file(op_mode mode, algorithm_type algo,
         goto cleanup;
     }
 
-    // --- Read Input File (for symmetric ciphers) ---
     fseek(fin, 0, SEEK_END);
     file_size = ftell(fin);
     if (file_size < 0) {
@@ -274,7 +420,7 @@ int process_file(op_mode mode, algorithm_type algo,
     fseek(fin, 0, SEEK_SET);
 
     if (mode == MODE_ENCRYPT) {
-        buffer = malloc(file_size); // Read entire plaintext
+        buffer = malloc(file_size); 
         if (!buffer) { perror("Error allocating memory for input buffer"); goto cleanup; }
         if (fread(buffer, 1, file_size, fin) != (size_t)file_size) {
             fprintf(stderr, "Error reading input file.\n"); goto cleanup;
@@ -282,8 +428,7 @@ int process_file(op_mode mode, algorithm_type algo,
         data_len = file_size;
         buffer_len = data_len;
 
-        // --- Padding (Symmetric Encryption) ---
-        buffer_len = add_padding(&buffer, data_len); // buffer might be realloc'd
+        buffer_len = add_padding(&buffer, data_len); 
         if (buffer_len == 0) { fprintf(stderr, "Error adding padding.\n"); goto cleanup; }
         printf("Original size: %zu bytes, Padded size: %zu bytes\n", data_len, buffer_len);
 
@@ -301,7 +446,7 @@ int process_file(op_mode mode, algorithm_type algo,
             perror("Error writing encrypted data"); goto cleanup;
         }
 
-    } else { // MODE_DECRYPT (Symmetric)
+    } else { 
         if (file_size < BLOCK_SIZE) {
             fprintf(stderr, "Error: Input file too small for IV (symmetric decryption).\n"); goto cleanup;
         }
@@ -313,7 +458,7 @@ int process_file(op_mode mode, algorithm_type algo,
         printf("Read IV from file.\n");
 
         buffer_len = file_size - BLOCK_SIZE;
-        if (buffer_len == 0 && algo != ALGO_NONE) { // ALGO_NONE check is defensive
+        if (buffer_len == 0 && algo != ALGO_NONE) {
              printf("No encrypted data found after IV (symmetric decryption).\n");
              result = 0; 
              goto cleanup;
@@ -343,22 +488,21 @@ int process_file(op_mode mode, algorithm_type algo,
         }
     }
 
-    result = 0; // Success for symmetric path
+    result = 0; 
 
 cleanup:
     if (fin) fclose(fin);
     if (fout) fclose(fout);
-    if (buffer) free(buffer); // Buffer is only for symmetric ciphers here
-cleanup_no_files: // Jump here if RSA handled files itself or on early RSA errors
+    if (buffer) free(buffer); 
+cleanup_no_files: 
     return result;
 }
 
 
-// --- Main Function ---
 int main(int argc, char *argv[]) {
     op_mode mode = MODE_NONE;
     algorithm_type algo = ALGO_NONE;
-    char *key_str = NULL;     // For symmetric algos
+    char *key_str = NULL;     
     char *infile = NULL;
     char *outfile = NULL;
     char *rsa_pubkey_file = NULL;
@@ -367,18 +511,12 @@ int main(int argc, char *argv[]) {
     int rsa_keysize = 0;
     int opt;
 
-    // Seed the pseudo-random number generator once
     srand(time(NULL));
 
-    // getopt option string: add g:N:P:S:
-    // g takes an argument (keysize)
-    // N takes an argument (key name base)
-    // P takes an argument (public key file)
-    // S takes an argument (private key file)
     while ((opt = getopt(argc, argv, "edg:a:k:i:o:hN:P:S:")) != -1) {
         switch (opt) {
             case 'e':
-                if (mode != MODE_NONE && mode != MODE_KEYGEN) { // Allow -e with -g if algo is rsa for some reason, though -g is primary
+                if (mode != MODE_NONE && mode != MODE_KEYGEN) { 
                     fprintf(stderr, "Error: Mode already specified.\n"); print_usage(argv[0]); return 1;
                 }
                 mode = MODE_ENCRYPT;
@@ -395,7 +533,7 @@ int main(int argc, char *argv[]) {
                 }
                 mode = MODE_KEYGEN;
                 rsa_keysize = atoi(optarg);
-                if (rsa_keysize == 0 && strcmp(optarg, "0") != 0) { // atoi returns 0 on error or for "0"
+                if (rsa_keysize == 0 && strcmp(optarg, "0") != 0) { 
                     fprintf(stderr, "Error: Invalid keysize '%s' for -g.\n", optarg); print_usage(argv[0]); return 1;
                 }
                 break;
@@ -419,19 +557,17 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    // --- Validate arguments based on mode ---
     if (mode == MODE_KEYGEN) {
-        if (rsa_keysize < 512) { // Basic check, rsa_generate_keypair might have stricter limits
+        if (rsa_keysize < 512) { 
             fprintf(stderr, "Error: Keysize for RSA generation (-g) must be at least 512 bits.\n"); print_usage(argv[0]); return 1;
         }
         if (!rsa_key_name_base) {
             fprintf(stderr, "Error: Key name base (-N) required for RSA key generation.\n"); print_usage(argv[0]); return 1;
         }
-        // Optionally, ensure algo is RSA or not set for keygen
         if (algo != ALGO_NONE && algo != ALGO_RSA) {
-             fprintf(stderr, "Warning: Algorithm (-a %s) specified with RSA key generation (-g) is ignored.\n", argv[optind-1]); // optind might be tricky here
+             fprintf(stderr, "Warning: Algorithm (-a %s) specified with RSA key generation (-g) is ignored.\n", argv[optind-1]); 
         }
-        algo = ALGO_RSA; // Implicitly RSA for keygen
+        algo = ALGO_RSA; 
     } else if (mode == MODE_ENCRYPT || mode == MODE_DECRYPT) {
         if (algo == ALGO_NONE) {
             fprintf(stderr, "Error: Algorithm (-a) must be specified for encryption/decryption.\n"); print_usage(argv[0]); return 1;
@@ -446,30 +582,28 @@ int main(int argc, char *argv[]) {
             if (mode == MODE_DECRYPT && !rsa_privkey_file) {
                 fprintf(stderr, "Error: RSA private key file (-S) required for decryption.\n"); print_usage(argv[0]); return 1;
             }
-        } else { // Symmetric algos
+        } else { 
             if (!key_str) {
                 fprintf(stderr, "Error: Key string (-k) required for %s.\n", (algo == ALGO_BLOWFISH ? "Blowfish" : "TEA"));
                 print_usage(argv[0]); return 1;
             }
         }
-    } else { // MODE_NONE
+    } else { 
         fprintf(stderr, "Error: Operation mode (-e, -d, or -g) must be specified.\n");
         print_usage(argv[0]);
         return 1;
     }
 
-    // Check for non-option arguments
     if (optind < argc) {
         fprintf(stderr, "Error: Unexpected arguments found: ");
         while (optind < argc) fprintf(stderr, "%s ", argv[optind++]);
         fprintf(stderr, "\n"); print_usage(argv[0]); return 1;
     }
 
-    // --- Execute Operation ---
     int operation_result = -1;
     if (mode == MODE_KEYGEN) {
         operation_result = handle_rsa_key_generation(rsa_key_name_base, rsa_keysize);
-    } else { // ENCRYPT or DECRYPT
+    } else { 
         operation_result = process_file(mode, algo, key_str, rsa_pubkey_file, rsa_privkey_file, infile, outfile);
     }
 

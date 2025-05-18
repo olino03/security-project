@@ -14,16 +14,14 @@ static uint F(const blowfish_ctx *ctx, uint x) {
     return (h ^ ctx->S[2][(x >> 8) & 0xFF]) + ctx->S[3][x & 0xFF];
 }
 
-// Initialize Blowfish context (P-array and S-boxes)
 void blowfish_init(blowfish_ctx *ctx, const uint8_t *key, size_t key_len) {
-    // Check for NULL key or zero length
     if (!key || key_len == 0) {
         memcpy(ctx->P, P_init, sizeof(P_init));
         memcpy(ctx->S, S_init, sizeof(S_init));
-        return; // Or return an error indicator
+        return;
     }
-     if (key_len > 56) { // Blowfish key length is max 448 bits (56 bytes)
-        key_len = 56; // Truncate or handle error as appropriate
+     if (key_len > 56) {
+        key_len = 56; 
     }
     
     memcpy(ctx->P, P_init, sizeof(P_init));

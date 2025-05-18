@@ -26,17 +26,14 @@ static void get_random_bytes_placeholder(unsigned char *buf, size_t len) {
 
 static int set_prime_candidate(mp_int *num, int bits) {
     int err;
-    // Calculate number of bytes needed for the specified number of bits
     int num_bytes = (bits + 7) / 8;
     unsigned char *buf = malloc(num_bytes);
     if (buf == NULL) {
-        return MP_MEM; // Memory allocation error
+        return MP_MEM; 
     }
 
-    // 1. Obtain random bytes from a CSPRNG
-    get_random_bytes_placeholder(buf, num_bytes); // CRITICAL: Replace with a real CSPRNG
+    get_random_bytes_placeholder(buf, num_bytes); 
 
-    // Convert the byte string to an mp_int
     if ((err = mp_from_ubin(num, buf, num_bytes)) != MP_OKAY) {
         free(buf);
         return err;
@@ -46,25 +43,25 @@ static int set_prime_candidate(mp_int *num, int bits) {
     if (num_bytes * 8 > bits) {
         mp_int temp_modulus;
         if ((err = mp_init(&temp_modulus)) != MP_OKAY) return err;
-        if ((err = mp_2expt(&temp_modulus, bits)) != MP_OKAY) { // temp_modulus = 2^bits
+        if ((err = mp_2expt(&temp_modulus, bits)) != MP_OKAY) { 
             mp_clear(&temp_modulus);
             return err;
         }
-        if ((err = mp_mod(num, &temp_modulus, num)) != MP_OKAY) { // num = num mod 2^bits
+        if ((err = mp_mod(num, &temp_modulus, num)) != MP_OKAY) { 
             mp_clear(&temp_modulus);
             return err;
         }
         mp_clear(&temp_modulus);
     }
     
-    if (bits > 0) { // Check to prevent issues if bits is 0 or negative (though unlikely here)
+    if (bits > 0) { 
         mp_int msb_val;
         if ((err = mp_init(&msb_val)) != MP_OKAY) return err;
-        if ((err = mp_2expt(&msb_val, bits - 1)) != MP_OKAY) { // msb_val = 2^(bits-1)
+        if ((err = mp_2expt(&msb_val, bits - 1)) != MP_OKAY) { 
             mp_clear(&msb_val);
             return err;
         }
-        if ((err = mp_or(num, &msb_val, num)) != MP_OKAY) { // num = num | msb_val
+        if ((err = mp_or(num, &msb_val, num)) != MP_OKAY) { 
             mp_clear(&msb_val);
             return err;
         }
@@ -72,23 +69,20 @@ static int set_prime_candidate(mp_int *num, int bits) {
     }
 
     if (mp_iseven(num)) {
-       if ((err = mp_add_d(num, 1UL, num)) != MP_OKAY) return err; // Add 1 if even
+       if ((err = mp_add_d(num, 1UL, num)) != MP_OKAY) return err; 
     }
 
     return MP_OKAY;
 }
 
-
-// Generates one prime number and stores it in result_prime.
 static int rsa_generate_one_prime(mp_int *result_prime, int bits, 
                                   const unsigned int *local_prime_list, int prime_list_size) {
     mp_int candidate, remainder;
-    mp_int small_primes_mp[NUM_SMALL_PRIMES]; // Adapt size if NUM_SMALL_PRIMES is very large and stack is an issue
+    mp_int small_primes_mp[NUM_SMALL_PRIMES]; 
     int err = MP_OKAY;
     int is_prime = 0;
     int initialized_small_primes = 0;
 
-    // Initialize mp_int array for small primes
     for (initialized_small_primes = 0; initialized_small_primes < prime_list_size; initialized_small_primes++) {
         if ((err = mp_init(&small_primes_mp[initialized_small_primes])) != MP_OKAY) {
             goto cleanup_small_primes_partial;
@@ -103,12 +97,10 @@ static int rsa_generate_one_prime(mp_int *result_prime, int bits,
     }
 
     do {
-        // Generate a prime candidate
         if ((err = set_prime_candidate(&candidate, bits)) != MP_OKAY) {
             goto cleanup_candidate_remainder;
         }
         
-        // Trial division by small primes
         int divisible_by_small_prime = 0;
         for (int i = 0; i < prime_list_size; i++) {
             if ((err = mp_div(&candidate, &small_primes_mp[i], NULL, &remainder)) != MP_OKAY) {
@@ -121,7 +113,7 @@ static int rsa_generate_one_prime(mp_int *result_prime, int bits,
         }
 
         if (divisible_by_small_prime) {
-            continue; // Try a new candidate
+            continue; 
         }
 
         if ((err = mp_prime_is_prime(&candidate, 5, &is_prime)) != MP_OKAY) {
@@ -129,7 +121,7 @@ static int rsa_generate_one_prime(mp_int *result_prime, int bits,
         }
     } while (!is_prime);
 
-    if (err == MP_OKAY) { // If loop exited because is_prime is true and no errors
+    if (err == MP_OKAY) { 
         err = mp_copy(&candidate, result_prime);
     }
 
@@ -137,7 +129,7 @@ cleanup_candidate_remainder:
     mp_clear(&candidate);
     mp_clear(&remainder);
 cleanup_small_primes_full: 
-cleanup_small_primes_partial: // Label for when only some small_primes_mp are initialized
+cleanup_small_primes_partial: 
     for (int i = 0; i < initialized_small_primes; i++) {
         mp_clear(&small_primes_mp[i]);
     }
@@ -147,7 +139,7 @@ cleanup_small_primes_partial: // Label for when only some small_primes_mp are in
 
 int rsa_generate_keypair(rsa_ctx *ctx, int keysize) {
     int err;
-    mp_int phi, p_minus_1, q_minus_1; // p and q are in ctx->p, ctx->q
+    mp_int phi, p_minus_1, q_minus_1; 
 
     int prime_bits = keysize / 2;
 
@@ -159,14 +151,14 @@ int rsa_generate_keypair(rsa_ctx *ctx, int keysize) {
         if ((err = rsa_generate_one_prime(&ctx->q, prime_bits, prime_list, NUM_SMALL_PRIMES)) != MP_OKAY) {
             return err;
         }
-    } while (mp_cmp(&ctx->p, &ctx->q) == MP_EQ); // Repeat if p == q
+    } while (mp_cmp(&ctx->p, &ctx->q) == MP_EQ); 
 
     if ((err = mp_mul(&ctx->p, &ctx->q, &ctx->n)) != MP_OKAY) {
         return err;
     }
 
     if ((err = mp_init_multi(&phi, &p_minus_1, &q_minus_1, NULL)) != MP_OKAY) {
-        return err; // Error initializing temps
+        return err; 
     }
     
     if ((err = mp_sub_d(&ctx->p, 1, &p_minus_1)) != MP_OKAY) goto cleanup_phi;
@@ -185,14 +177,14 @@ int rsa_generate_keypair(rsa_ctx *ctx, int keysize) {
 
 cleanup_phi:
     mp_clear_multi(&phi, &p_minus_1, &q_minus_1, NULL);
-    return err; // Return the latest error code, or MP_OKAY if successful
+    return err; 
 }
 
 int rsa_encrypt_file(rsa_ctx *ctx, const char *infile_name, const char *outfile_name) {
     FILE *fin = fopen(infile_name, "rb");
     if (!fin) {
         perror("Error opening input file for encryption");
-        return MP_ERR; // Indicate generic error, or use a custom code
+        return MP_ERR; 
     }
     FILE *fout = fopen(outfile_name, "wb");
     if (!fout) {
@@ -203,11 +195,11 @@ int rsa_encrypt_file(rsa_ctx *ctx, const char *infile_name, const char *outfile_
 
     int modulus_bytes = mp_unsigned_bin_size(&ctx->n);
     int block_size = modulus_bytes - 11; 
-    if (block_size <= 0) { // Modulus too small for PKCS#1 v1.5 padding
+    if (block_size <= 0) { 
         fprintf(stderr, "RSA modulus too small for PKCS#1 v1.5 padding.\n");
         fclose(fin);
         fclose(fout);
-        return MP_VAL; // Invalid parameter or value error
+        return MP_VAL; 
     }
 
     unsigned char *data_block_buf = malloc(block_size);
@@ -237,17 +229,16 @@ int rsa_encrypt_file(rsa_ctx *ctx, const char *infile_name, const char *outfile_
         unsigned char *cipher_bytes = malloc(cipher_size);
         if (!cipher_bytes) { err = MP_MEM; break; }
 
-        if ((err = mp_to_unsigned_bin(&cipher, cipher_bytes)) != MP_OKAY) { // Use mp_to_unsigned_bin_n for fixed size buffer
+        if ((err = mp_to_unsigned_bin(&cipher, cipher_bytes)) != MP_OKAY) { 
             free(cipher_bytes);
             break;
         }
         
-        // Write size of ciphertext block, then ciphertext block
         if (fwrite(&cipher_size, sizeof(int), 1, fout) != 1) { err = MP_ERR; free(cipher_bytes); break; }
         if (fwrite(cipher_bytes, 1, cipher_size, fout) != cipher_size) { err = MP_ERR; free(cipher_bytes); break; }
         free(cipher_bytes);
     }
-    if (ferror(fin)) { // Check for read errors
+    if (ferror(fin)) { 
         err = MP_ERR; 
     }
 
@@ -273,7 +264,7 @@ int rsa_decrypt_file(rsa_ctx *ctx, const char *infile_name, const char *outfile_
     }
 
     mp_int cipher, plain;
-    mp_int m1, m2, h; // For CRT
+    mp_int m1, m2, h; 
     int err = MP_OKAY;
 
     if ((err = mp_init_multi(&cipher, &plain, &m1, &m2, &h, NULL)) != MP_OKAY) {
@@ -284,8 +275,7 @@ int rsa_decrypt_file(rsa_ctx *ctx, const char *infile_name, const char *outfile_
 
     int cipher_block_size;
     while (fread(&cipher_block_size, sizeof(int), 1, fin) == 1) {
-        if (cipher_block_size <= 0 || cipher_block_size > mp_unsigned_bin_size(&ctx->n) + 4 /*some margin*/) {
-             // Basic sanity check for block size
+        if (cipher_block_size <= 0 || cipher_block_size > mp_unsigned_bin_size(&ctx->n) + 4 ) {
             err = MP_VAL; 
             break;
         }
@@ -294,7 +284,7 @@ int rsa_decrypt_file(rsa_ctx *ctx, const char *infile_name, const char *outfile_
 
         if (fread(cipher_bytes_buf, 1, cipher_block_size, fin) != cipher_block_size) {
             free(cipher_bytes_buf);
-            err = MP_ERR; // Read error or unexpected EOF
+            err = MP_ERR; 
             break;
         }
         
@@ -307,7 +297,7 @@ int rsa_decrypt_file(rsa_ctx *ctx, const char *infile_name, const char *outfile_
         if ((err = mp_exptmod(&cipher, &ctx->dp, &ctx->p, &m1)) != MP_OKAY) break;
         if ((err = mp_exptmod(&cipher, &ctx->dq, &ctx->q, &m2)) != MP_OKAY) break;
 
-        mp_sub(&m1, &m2, &h); // h = m1 - m2
+        mp_sub(&m1, &m2, &h); 
         if ((err = mp_mulmod(&h, &ctx->qinv, &ctx->p, &h)) != MP_OKAY) break;
         
         if ((err = mp_mul(&h, &ctx->q, &h)) != MP_OKAY) break;
@@ -326,7 +316,7 @@ int rsa_decrypt_file(rsa_ctx *ctx, const char *infile_name, const char *outfile_
         }
         free(plain_bytes_buf);
     }
-    if (ferror(fin) && err == MP_OKAY) { // Check for read errors if no other LTM error occurred
+    if (ferror(fin) && err == MP_OKAY) { 
          err = MP_ERR;
     }
 
