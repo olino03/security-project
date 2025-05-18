@@ -6,11 +6,11 @@
 
 typedef uint32_t uint;
 
-typedef struct {
+typedef struct
+{
     uint P[18];
     uint S[4][256];
 } blowfish_ctx;
-
 
 void blowfish_init(blowfish_ctx *ctx, const uint8_t *key, size_t key_len);
 void blowfish_encrypt(const blowfish_ctx *ctx, uint *L, uint *R);
