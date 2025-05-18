@@ -159,7 +159,7 @@ int process_file(op_mode mode, algorithm_type algo,
     crypt_func_t decrypt_block_sym = NULL;
 
     rsa_ctx rsa_ctx_obj;
-    int rsa_err;
+    int rsa_err = MP_OKAY;
 
     switch (algo)
     {
@@ -167,7 +167,7 @@ int process_file(op_mode mode, algorithm_type algo,
         if (!key_str)
         {
             fprintf(stderr, "Error: Key string (-k) required for Blowfish.\n");
-            goto cleanup;
+            return -1;
         }
         blowfish_init(&bf_ctx_sym, (const uint8_t *)key_str, strlen(key_str));
         cipher_context_sym = &bf_ctx_sym;
@@ -179,7 +179,7 @@ int process_file(op_mode mode, algorithm_type algo,
         if (!key_str)
         {
             fprintf(stderr, "Error: Key string (-k) required for TEA.\n");
-            goto cleanup;
+            return -1;
         }
         tea_prepare_key(tea_key, (const uint8_t *)key_str, strlen(key_str));
         cipher_context_sym = tea_key;
@@ -204,7 +204,6 @@ int process_file(op_mode mode, algorithm_type algo,
             }
             if ((rsa_err = rsa_load_public_key_from_file(&rsa_ctx_obj, pubkey_file)) != MP_OKAY)
             {
-                fprintf(stderr, "Error: Failed to load RSA public key from %s: %s\n", pubkey_file, mp_error_to_string(rsa_err));
                 rsa_clear_ctx(&rsa_ctx_obj);
                 return -1;
             }
@@ -219,7 +218,6 @@ int process_file(op_mode mode, algorithm_type algo,
             }
             if ((rsa_err = rsa_load_private_key_from_file(&rsa_ctx_obj, privkey_file)) != MP_OKAY)
             {
-                fprintf(stderr, "Error: Failed to load RSA private key from %s: %s\n", privkey_file, mp_error_to_string(rsa_err));
                 rsa_clear_ctx(&rsa_ctx_obj);
                 return -1;
             }
@@ -227,26 +225,56 @@ int process_file(op_mode mode, algorithm_type algo,
         break;
     default:
         fprintf(stderr, "Error: Invalid algorithm selected for processing.\n");
-        goto cleanup;
+        return -1;
     }
 
     if (algo == ALGO_RSA)
     {
+        if (mode == MODE_ENCRYPT)
+        {
+            printf("Encrypting %s to %s using RSA...\n", infile, outfile);
+            rsa_err = rsa_encrypt_file(&rsa_ctx_obj, infile, outfile);
+            if (rsa_err != MP_OKAY)
+            {
+                fprintf(stderr, "Error: RSA encryption failed: %s\n", mp_error_to_string(rsa_err));
+                result = -1;
+            }
+            else
+            {
+                printf("RSA encryption successful.\n");
+                result = 0;
+            }
+        }
+        else if (mode == MODE_DECRYPT)
+        {
+            printf("Decrypting %s to %s using RSA...\n", infile, outfile);
+            rsa_err = rsa_decrypt_file(&rsa_ctx_obj, infile, outfile);
+            if (rsa_err != MP_OKAY)
+            {
+                fprintf(stderr, "Error: RSA decryption failed: %s\n", mp_error_to_string(rsa_err));
+                result = -1;
+            }
+            else
+            {
+                printf("RSA decryption successful.\n");
+                result = 0;
+            }
+        }
         rsa_clear_ctx(&rsa_ctx_obj);
-        return (rsa_err == MP_OKAY) ? 0 : -1;
+        return result;
     }
 
     fin = fopen(infile, "rb");
     if (!fin)
     {
-        perror("Error opening input file");
+        fprintf(stderr, "Error opening input file '%s': %s\n", infile, strerror(errno));
         goto cleanup;
     }
 
     fout = fopen(outfile, "wb");
     if (!fout)
     {
-        perror("Error opening output file");
+        fprintf(stderr, "Error opening output file '%s': %s\n", outfile, strerror(errno));
         goto cleanup;
     }
 
@@ -254,7 +282,7 @@ int process_file(op_mode mode, algorithm_type algo,
     file_size = ftell(fin);
     if (file_size < 0)
     {
-        perror("Error getting input file size");
+        fprintf(stderr, "Error getting input file size for '%s': %s\n", infile, strerror(errno));
         goto cleanup;
     }
     fseek(fin, 0, SEEK_SET);
@@ -264,30 +292,40 @@ int process_file(op_mode mode, algorithm_type algo,
         buffer = malloc(file_size);
         if (!buffer)
         {
-            perror("Error allocating memory for input buffer");
+            fprintf(stderr, "Error: Failed to allocate memory for input buffer (%ld bytes).\n", file_size);
             goto cleanup;
         }
         if (fread(buffer, 1, file_size, fin) != (size_t)file_size)
         {
-            fprintf(stderr, "Error reading input file.\n");
+            fprintf(stderr, "Error reading input file '%s'.\n", infile);
             goto cleanup;
         }
         data_len = file_size;
         buffer_len = data_len;
 
         buffer_len = add_padding(&buffer, data_len);
-        if (buffer_len == 0)
+        if (buffer_len == 0 && data_len > 0)
         {
-            fprintf(stderr, "Error adding padding.\n");
+            fprintf(stderr, "Error adding padding to data.\n");
             goto cleanup;
         }
+        if (buffer_len == 0 && data_len == 0)
+        {
+            printf("Input file was empty. Padding to one block.\n");
+            if (buffer == NULL)
+            {
+                fprintf(stderr, "Error: Buffer is null after padding an empty file.\n");
+                goto cleanup;
+            }
+        }
+
         printf("Original size: %zu bytes, Padded size: %zu bytes\n", data_len, buffer_len);
 
         uint8_t iv[BLOCK_SIZE];
         generate_iv(iv);
         if (fwrite(iv, 1, BLOCK_SIZE, fout) != BLOCK_SIZE)
         {
-            perror("Error writing IV to output file");
+            fprintf(stderr, "Error writing IV to output file '%s': %s\n", outfile, strerror(errno));
             goto cleanup;
         }
         printf("Generated and wrote IV.\n");
@@ -297,7 +335,7 @@ int process_file(op_mode mode, algorithm_type algo,
 
         if (fwrite(buffer, 1, buffer_len, fout) != buffer_len)
         {
-            perror("Error writing encrypted data");
+            fprintf(stderr, "Error writing encrypted data to '%s': %s\n", outfile, strerror(errno));
             goto cleanup;
         }
     }
@@ -305,59 +343,71 @@ int process_file(op_mode mode, algorithm_type algo,
     {
         if (file_size < BLOCK_SIZE)
         {
-            fprintf(stderr, "Error: Input file too small for IV (symmetric decryption).\n");
+            fprintf(stderr, "Error: Input file '%s' too small for IV (symmetric decryption).\n", infile);
             goto cleanup;
         }
 
         uint8_t iv[BLOCK_SIZE];
         if (fread(iv, 1, BLOCK_SIZE, fin) != BLOCK_SIZE)
         {
-            fprintf(stderr, "Error reading IV from input file.\n");
+            fprintf(stderr, "Error reading IV from input file '%s'.\n", infile);
             goto cleanup;
         }
         printf("Read IV from file.\n");
 
         buffer_len = file_size - BLOCK_SIZE;
-        if (buffer_len == 0 && algo != ALGO_NONE)
+        if (buffer_len == 0)
         {
-            printf("No encrypted data found after IV (symmetric decryption).\n");
-            result = 0;
-            goto cleanup;
+            printf("No encrypted data found after IV in '%s' (symmetric decryption).\n", infile);
         }
-        if (buffer_len % BLOCK_SIZE != 0 && algo != ALGO_NONE)
+        else if (buffer_len % BLOCK_SIZE != 0)
         {
-            fprintf(stderr, "Warning: Encrypted data size (%zu) not multiple of block size (%d).\n", buffer_len, BLOCK_SIZE);
+            fprintf(stderr, "Warning: Encrypted data size (%zu) in '%s' is not a multiple of block size (%d).\n", buffer_len, infile, BLOCK_SIZE);
         }
 
-        buffer = malloc(buffer_len);
-        if (!buffer)
+        if (buffer_len > 0)
         {
-            perror("Error allocating memory for input buffer");
-            goto cleanup;
-        }
-        if (fread(buffer, 1, buffer_len, fin) != buffer_len)
-        {
-            fprintf(stderr, "Error reading encrypted data.\n");
-            goto cleanup;
-        }
+            buffer = malloc(buffer_len);
+            if (!buffer)
+            {
+                fprintf(stderr, "Error: Failed to allocate memory for encrypted data buffer (%zu bytes).\n", buffer_len);
+                goto cleanup;
+            }
+            if (fread(buffer, 1, buffer_len, fin) != buffer_len)
+            {
+                fprintf(stderr, "Error reading encrypted data from '%s'.\n", infile);
+                goto cleanup;
+            }
 
-        cbc_decrypt(decrypt_block_sym, cipher_context_sym, iv, buffer, buffer_len);
-        printf("Symmetric decryption complete.\n");
+            cbc_decrypt(decrypt_block_sym, cipher_context_sym, iv, buffer, buffer_len);
+            printf("Symmetric decryption complete.\n");
 
-        data_len = check_remove_padding(buffer, buffer_len);
-        if (data_len == buffer_len && buffer_len > 0)
-        {
-            printf("Warning: Invalid padding or no padding found (symmetric decryption).\n");
+            data_len = check_remove_padding(buffer, buffer_len);
+            if (data_len == buffer_len && buffer_len > 0)
+            {
+                printf("Warning: Invalid padding or no padding found in data from '%s' (symmetric decryption). Outputting as is.\n", infile);
+            }
+            else if (buffer_len > 0)
+            {
+                printf("Padding removed. Original data size: %zu bytes\n", data_len);
+            }
         }
         else
         {
-            printf("Padding removed. Original size: %zu bytes\n", data_len);
+            data_len = 0;
         }
 
-        if (fwrite(buffer, 1, data_len, fout) != data_len)
+        if (data_len > 0)
         {
-            perror("Error writing decrypted data");
-            goto cleanup;
+            if (fwrite(buffer, 1, data_len, fout) != data_len)
+            {
+                fprintf(stderr, "Error writing decrypted data to '%s': %s\n", outfile, strerror(errno));
+                goto cleanup;
+            }
+        }
+        else
+        {
+            printf("Decrypted data is empty.\n");
         }
     }
 
@@ -367,10 +417,15 @@ cleanup:
     if (fin)
         fclose(fin);
     if (fout)
-        fclose(fout);
+    {
+        if (fclose(fout) == EOF && result == 0)
+        {
+            fprintf(stderr, "Error closing output file '%s': %s\n", outfile, strerror(errno));
+            result = -1;
+        }
+    }
     if (buffer)
         free(buffer);
-cleanup_no_files:
     return result;
 }
 
